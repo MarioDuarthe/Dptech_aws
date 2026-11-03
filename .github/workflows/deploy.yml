@@ -1,0 +1,128 @@
+name: Deploy Lambdas (DPTECH)
+on:
+  pull_request:
+    types: [closed]
+    branches: ["HML", "PROD"]
+
+jobs:
+  deploy:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Detectar arquivos alterados
+      - name: Get changed files
+        id: changed
+        run: |
+          FILES=$(git diff --name-only \
+            ${{ github.event.pull_request.base.sha }} \
+            ${{ github.event.pull_request.merge_commit_sha }})
+
+          echo "FILES<<EOF" >> $GITHUB_OUTPUT
+          echo "$FILES" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      # Extrair lambdas alteradas
+      - name: Extract lambdas
+        id: lambdas
+        run: |
+          CANDIDATES=$(echo "${{ steps.changed.outputs.FILES }}" \
+            | grep -E '^lambdas/[^/]+/' \
+            | cut -d'/' -f2 \
+            | sort -u)
+
+          LAMBDAS=""
+
+          for LAMBDA in $CANDIDATES
+          do
+            if [ -d "lambdas/$LAMBDA" ]; then
+              LAMBDAS="$LAMBDAS $LAMBDA"
+            else
+              echo "Ignorando lambda removida: $LAMBDA"
+            fi
+          done
+
+          echo "LAMBDAS=$LAMBDAS" >> $GITHUB_OUTPUT
+
+      - name: Debug files
+        run: |
+          echo "${{ steps.changed.outputs.FILES }}"    
+
+      # Se não mudou lambda → parar
+      - name: Skip if no lambda changed
+        if: steps.lambdas.outputs.LAMBDAS == ''
+        run: |
+          echo "Nenhuma lambda alterada"
+          exit 0
+
+      # Python
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Definir alias baseado na branch
+      - name: Define alias
+        run: |
+          BRANCH="${{ github.base_ref }}"
+          
+          if [ "$BRANCH" = "HML" ]; then
+            echo "ALIAS=HML" >> $GITHUB_ENV
+          elif [ "$BRANCH" = "PROD" ]; then
+            echo "ALIAS=PROD" >> $GITHUB_ENV
+          else
+            echo "Branch não suportada"
+            exit 1
+          fi
+
+      # Loop nas lambdas alteradas
+      - name: Deploy lambdas
+        run: |
+          for LAMBDA in ${{ steps.lambdas.outputs.LAMBDAS }}
+          do
+            if [ ! -d "lambdas/$LAMBDA" ]; then
+              echo "Lambda $LAMBDA não existe mais. Ignorando."
+              continue
+            fi
+
+            echo "Deploy da lambda: $LAMBDA"
+
+            cd lambdas/$LAMBDA
+
+            if [ -f requirements.txt ]; then
+              pip install -r requirements.txt -t .
+            fi
+
+            zip -r ../../lambda.zip .
+            cd ../../
+
+            FUNCTION_NAME="dptech-$LAMBDA"
+
+            aws lambda update-function-code \
+              --function-name $FUNCTION_NAME \
+              --zip-file fileb://lambda.zip
+
+            aws lambda wait function-updated \
+              --function-name $FUNCTION_NAME
+
+            VERSION=$(aws lambda publish-version \
+              --function-name $FUNCTION_NAME \
+              --query Version \
+              --output text)
+
+            echo "Versão publicada: $VERSION"
+
+            aws lambda update-alias \
+              --function-name $FUNCTION_NAME \
+              --name $ALIAS \
+              --function-version $VERSION
+
+            rm -f lambda.zip
+          done
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
