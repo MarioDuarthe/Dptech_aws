@@ -1,0 +1,322 @@
+name: Terraform Infrastructure
+
+on:
+  pull_request:
+    branches:
+      - Terraform
+    paths:
+      - "infra/**"
+
+  push:
+    branches:
+      - Terraform
+    paths:
+      - "infra/**"
+
+permissions:
+  contents: read
+  pull-requests: read
+
+env:
+  AWS_DEFAULT_REGION: us-east-1
+  TF_IN_AUTOMATION: true
+  TF_INPUT: false
+
+jobs:
+
+  # ==========================================================
+  # IDENTIFICAR QUAIS AMBIENTES FORAM ALTERADOS
+  #
+  # Alteração em:
+  #
+  # infra/envs/hml/**  -> HML
+  # infra/envs/prod/** -> PROD
+  # infra/modules/**   -> HML + PROD
+  #
+  # ==========================================================
+
+  changes:
+    name: Detect Terraform Changes
+    runs-on: ubuntu-latest
+
+    outputs:
+      hml: ${{ steps.filter.outputs.hml }}
+      prod: ${{ steps.filter.outputs.prod }}
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Detect changed environments
+        id: filter
+        uses: dorny/paths-filter@v4
+        with:
+          filters: |
+            hml:
+              - 'infra/envs/hml/**'
+              - 'infra/modules/**'
+            
+            prod:
+              - 'infra/envs/prod/**'
+              - 'infra/modules/**'
+
+
+  # ==========================================================
+  # PLAN HML
+  #
+  # Executa somente em Pull Request.
+  # ==========================================================
+
+  plan-hml:
+    name: Terraform Plan HML
+    needs: changes
+
+    if: |
+      github.event_name == 'pull_request' &&
+      needs.changes.outputs.hml == 'true'
+
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: infra/envs/hml
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.10.5
+
+      - name: Terraform Format Check
+        run: terraform fmt -check
+
+      - name: Terraform Init
+        run: terraform init -input=false
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.TERRAFORM_AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.TERRAFORM_AWS_SECRET_ACCESS_KEY }}
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Terraform Plan HML
+        run: terraform plan -input=false -no-color
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.TERRAFORM_AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.TERRAFORM_AWS_SECRET_ACCESS_KEY }}
+
+
+  # ==========================================================
+  # PLAN PROD
+  #
+  # Depende de:
+  #
+  # - changes
+  # - plan-hml
+  #
+  # Regras:
+  #
+  # Somente PROD alterado:
+  #   plan-hml = skipped
+  #   plan-prod executa normalmente
+  #
+  # HML + PROD alterados:
+  #   plan-prod somente executa se plan-hml tiver sucesso
+  #
+  # ==========================================================
+
+  plan-prod:
+    name: Terraform Plan PROD
+
+    needs:
+      - changes
+      - plan-hml
+
+    if: |
+      always() &&
+      github.event_name == 'pull_request' &&
+      needs.changes.outputs.prod == 'true' &&
+      (
+        needs.changes.outputs.hml != 'true' ||
+        needs.plan-hml.result == 'success'
+      )
+
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: infra/envs/prod
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.10.5
+
+      - name: Terraform Format Check
+        run: terraform fmt -check
+
+      - name: Terraform Init
+        run: terraform init -input=false
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.TERRAFORM_AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.TERRAFORM_AWS_SECRET_ACCESS_KEY }}
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Terraform Plan PROD
+        run: terraform plan -input=false -no-color
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.TERRAFORM_AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.TERRAFORM_AWS_SECRET_ACCESS_KEY }}
+
+
+  # ==========================================================
+  # APPLY HML
+  #
+  # Executa somente quando houver PUSH na branch terraform.
+  #
+  # Normalmente esse push será resultado do merge do PR.
+  # ==========================================================
+
+  apply-hml:
+    name: Terraform Apply HML
+
+    needs: changes
+
+    if: |
+      github.event_name == 'push' &&
+      needs.changes.outputs.hml == 'true'
+
+    runs-on: ubuntu-latest
+
+    concurrency:
+      group: terraform-hml
+      cancel-in-progress: false
+
+    defaults:
+      run:
+        working-directory: infra/envs/hml
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.10.5
+
+      - name: Terraform Init
+        run: terraform init -input=false
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.TERRAFORM_AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.TERRAFORM_AWS_SECRET_ACCESS_KEY }}
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Terraform Plan HML
+        run: terraform plan -input=false -out=tfplan
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.TERRAFORM_AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.TERRAFORM_AWS_SECRET_ACCESS_KEY }}
+
+      - name: Terraform Apply HML
+        run: terraform apply -input=false -auto-approve tfplan
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.TERRAFORM_AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.TERRAFORM_AWS_SECRET_ACCESS_KEY }}
+
+
+  # ==========================================================
+  # APPLY PROD
+  #
+  # Depende de:
+  #
+  # - changes
+  # - apply-hml
+  #
+  # Se HML e PROD foram alterados:
+  #
+  #   APPLY HML
+  #       ↓
+  #   sucesso
+  #       ↓
+  #   APPLY PROD
+  #
+  # Se somente PROD foi alterado:
+  #
+  #   apply-hml = skipped
+  #       ↓
+  #   APPLY PROD
+  #
+  # ==========================================================
+
+  apply-prod:
+    name: Terraform Apply PROD
+
+    needs:
+      - changes
+      - apply-hml
+
+    if: |
+      always() &&
+      github.event_name == 'push' &&
+      needs.changes.outputs.prod == 'true' &&
+      (
+        needs.changes.outputs.hml != 'true' ||
+        needs.apply-hml.result == 'success'
+      )
+
+    runs-on: ubuntu-latest
+
+    concurrency:
+      group: terraform-prod
+      cancel-in-progress: false
+
+    defaults:
+      run:
+        working-directory: infra/envs/prod
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.10.5
+
+      - name: Terraform Init
+        run: terraform init -input=false
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.TERRAFORM_AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.TERRAFORM_AWS_SECRET_ACCESS_KEY }}
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Terraform Plan PROD
+        run: terraform plan -input=false -out=tfplan
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.TERRAFORM_AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.TERRAFORM_AWS_SECRET_ACCESS_KEY }}
+
+      - name: Terraform Apply PROD
+        run: terraform apply -input=false -auto-approve tfplan
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.TERRAFORM_AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.TERRAFORM_AWS_SECRET_ACCESS_KEY }}
