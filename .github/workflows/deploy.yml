@@ -78,49 +78,46 @@ jobs:
             exit 1
           fi
 
-      # Loop nas lambdas alteradas
+      - name: Verify AWS identity
+        if: steps.lambdas.outputs.LAMBDAS != ''
+        run: aws sts get-caller-identity
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+
       - name: Deploy lambdas
+        if: steps.lambdas.outputs.LAMBDAS != ''
         run: |
+          set -euo pipefail
+          export AWS_PAGER=""
+          trap 'echo "ERRO linha $LINENO: [$BASH_COMMAND] saiu com código $?"' ERR
+
           for LAMBDA in ${{ steps.lambdas.outputs.LAMBDAS }}
           do
-            if [ ! -d "lambdas/$LAMBDA" ]; then
-              echo "Lambda $LAMBDA não existe mais. Ignorando."
-              continue
-            fi
-
             echo "Deploy da lambda: $LAMBDA"
+            FUNCTION_NAME="dptech-$LAMBDA"
+            rm -f "$GITHUB_WORKSPACE/lambda.zip"
 
-            cd lambdas/$LAMBDA
-
+            cd "lambdas/$LAMBDA"
             if [ -f requirements.txt ]; then
               pip install -r requirements.txt -t .
             fi
+            zip -r "$GITHUB_WORKSPACE/lambda.zip" .
+            cd "$GITHUB_WORKSPACE"
 
-            zip -r ../../lambda.zip .
-            cd ../../
+            echo ">> update-function-code"
+            aws lambda update-function-code --function-name "$FUNCTION_NAME" --zip-file fileb://lambda.zip
 
-            FUNCTION_NAME="dptech-$LAMBDA"
+            echo ">> wait function-updated"
+            aws lambda wait function-updated --function-name "$FUNCTION_NAME"
 
-            aws lambda update-function-code \
-              --function-name $FUNCTION_NAME \
-              --zip-file fileb://lambda.zip
-
-            aws lambda wait function-updated \
-              --function-name $FUNCTION_NAME
-
-            VERSION=$(aws lambda publish-version \
-              --function-name $FUNCTION_NAME \
-              --query Version \
-              --output text)
-
+            echo ">> publish-version"
+            VERSION=$(aws lambda publish-version --function-name "$FUNCTION_NAME" --query Version --output text)
             echo "Versão publicada: $VERSION"
 
-            aws lambda update-alias \
-              --function-name $FUNCTION_NAME \
-              --name $ALIAS \
-              --function-version $VERSION
-
-            rm -f lambda.zip
+            echo ">> update-alias $ALIAS"
+            aws lambda update-alias --function-name "$FUNCTION_NAME" --name "$ALIAS" --function-version "$VERSION"
           done
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
