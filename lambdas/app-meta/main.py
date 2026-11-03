@@ -3,10 +3,7 @@ import json
 
 def lambda_handler(event, context):
     q = event.get("queryStringParameters") or {}
-
-    texto = 'teste de atualização do fonte via github'
-    
-
+   
     # Verificação da Meta (GET)
     if "hub.challenge" in q:
         return {"statusCode": 200,
