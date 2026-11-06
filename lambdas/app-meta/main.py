@@ -1,9 +1,15 @@
 import json
 
 
-def lambda_handler(event, context):
+# ===========================================================================
+# HANDLER PRINCIPAL
+# ===========================================================================
+def lambda_handler(event : dict, context: Any) -> dict:
+
+    print(json.dumps(event, ensure_ascii=False))
+
     q = event.get("queryStringParameters") or {}
-   
+
     # Verificação da Meta (GET)
     if "hub.challenge" in q:
         return {"statusCode": 200,
